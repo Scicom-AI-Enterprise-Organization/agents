@@ -1,0 +1,2 @@
+# the repository's Python ignores drop any lib/, but the frontend imports frontend/lib
+!frontend/lib/
