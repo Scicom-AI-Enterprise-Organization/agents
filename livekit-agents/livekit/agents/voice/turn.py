@@ -284,6 +284,11 @@ class TurnHandlingOptions(TypedDict, total=False):
     """Preemptive generation configuration. Use ``{"enabled": False}`` to disable."""
     user_turn_limit: UserTurnLimitOptions
     """User turn limit configuration. Use ``{"max_words": 50}`` to enable."""
+    collapse_user_turns: bool
+    """Collapse the user's turns into one until the agent answers. Speech the user adds before
+    any agent audio plays, and before a tool runs, extends their last user message (same id,
+    combined content) and its transcription segment, instead of starting new ones. Defaults
+    to ``False``."""
 
 
 def _resolve_preemptive_generation(

@@ -37,6 +37,7 @@ from ..llm import (
     LLM,
     AgentHandoff,
     ChatContext,
+    ChatMessage,
     DuplexModel,
     DuplexRealtimeAdapter,
     MetricsReport,
@@ -339,6 +340,10 @@ class AgentSessionOptions:
     def preemptive_generation(self) -> PreemptiveGenerationOptions:
         return self.turn_handling["preemptive_generation"]
 
+    @property
+    def collapse_user_turns(self) -> bool:
+        return self.turn_handling.get("collapse_user_turns", False)
+
 
 Userdata_T = TypeVar("Userdata_T")
 Run_T = TypeVar("Run_T")
@@ -603,6 +608,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
                 turn_detection=raw_turn_detection,
                 preemptive_generation=preemptive_gen,
                 user_turn_limit=user_turn_limit,
+                collapse_user_turns=turn_handling.get("collapse_user_turns", False),
             ),
             stt_context_options=_resolve_stt_context_options(stt_context),
             endpointing_overrides=endpointing_overrides,
@@ -738,6 +744,9 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         self._early_assistant_metrics: MetricsReport | None = None
         # the latest user turn no agent speech has reported e2e_latency for yet
         self._unanswered_user_metrics: MetricsReport | None = None
+        # the latest spoken user message the agent has not answered yet; with
+        # collapse_user_turns, the user's next spoken turn extends it
+        self._unanswered_user_message: ChatMessage | None = None
 
         # trace
         self._user_speaking_span: trace.Span | None = None
@@ -2176,6 +2185,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         if state == "speaking":
             self._llm_error_counts = 0
             self._tts_error_counts = 0
+            self._user_turn_answered()
 
             if self._agent_speaking_span is None:
                 self._agent_speaking_span = tracer.start_span(
@@ -2306,7 +2316,12 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         self.emit("user_input_transcribed", ev)
 
     def _conversation_item_added(self, message: llm.ChatMessage) -> None:
-        self._chat_ctx.insert(message)
+        # a collapsed user turn is added again under the id of the turn it extends
+        self._chat_ctx._upsert_item(message)
+        if message.role == "assistant":
+            self._user_turn_answered()
+        else:
+            self._unanswered_user_message = None
         if text := message.raw_text_content:
             logger.debug(
                 "conversation_item_added",
@@ -2315,9 +2330,16 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         self.emit("conversation_item_added", ConversationItemAddedEvent(item=message))
 
     def _tool_items_added(self, items: Sequence[llm.FunctionCall | llm.FunctionCallOutput]) -> None:
+        self._user_turn_answered()
         for item in items:
             # a call recorded when its execution started must not be inserted a second time
             self._chat_ctx._upsert_item(item)
+
+    def _user_turn_answered(self) -> None:
+        """The agent spoke or acted, so the user's next words start a new turn."""
+        self._unanswered_user_message = None
+        if self._room_io is not None:
+            self._room_io._end_user_transcript_turn()
 
     def _tool_execution_updated(self, ev: ToolExecutionUpdatedEvent) -> None:
         if (

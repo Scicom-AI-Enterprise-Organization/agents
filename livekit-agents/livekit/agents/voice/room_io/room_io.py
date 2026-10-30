@@ -41,6 +41,10 @@ from .types import (
 )
 
 
+class _EndOfUserTurn:
+    """Marks, in order with the user's transcripts, that the agent answered their turn."""
+
+
 class RoomIO:
     def __init__(
         self,
@@ -80,7 +84,9 @@ class RoomIO:
 
         self._ready_fut: asyncio.Future[None] = asyncio.Future()
         self._init_atask: asyncio.Task[None] | None = None
-        self._user_transcript_ch: utils.aio.Chan[UserInputTranscribedEvent] | None = None
+        self._user_transcript_ch: (
+            utils.aio.Chan[UserInputTranscribedEvent | _EndOfUserTurn] | None
+        ) = None
         self._user_transcript_atask: asyncio.Task[None] | None = None
         self._tasks: set[asyncio.Task[Any] | asyncio.Future[Any]] = set()
         self._update_state_atask: asyncio.Task[None] | None = None
@@ -159,7 +165,7 @@ class RoomIO:
             self._user_tr_output = _ParticipantTranscriptionOutput(
                 room=self._room, is_delta_stream=False, participant=self._participant_identity
             )
-            self._user_transcript_ch = utils.aio.Chan[UserInputTranscribedEvent]()
+            self._user_transcript_ch = utils.aio.Chan[UserInputTranscribedEvent | _EndOfUserTurn]()
             self._user_transcript_atask = asyncio.create_task(
                 self._forward_user_transcript(self._user_transcript_ch)
             )
@@ -404,15 +410,54 @@ class RoomIO:
 
     @utils.log_exceptions(logger=logger)
     async def _forward_user_transcript(
-        self, event_ch: utils.aio.Chan[UserInputTranscribedEvent]
+        self, event_ch: utils.aio.Chan[UserInputTranscribedEvent | _EndOfUserTurn]
     ) -> None:
+        # with collapse_user_turns, every final of a turn the agent has not answered stays on
+        # one segment, which is published as final once the agent answers
+        turn_text = ""  # the finals already on the open segment
+        transcribing = False  # an utterance is on the segment but not final yet
+        end_on_final = False
         async for ev in event_ch:
             if self._user_tr_output is None:
                 continue
 
-            await self._user_tr_output.capture_text(ev.transcript)
+            if isinstance(ev, _EndOfUserTurn):
+                if transcribing and turn_text:
+                    # the utterance still being transcribed moves to the next segment
+                    await self._user_tr_output.capture_text(turn_text)
+                    self._user_tr_output.flush()
+                    turn_text = ""
+                elif transcribing:
+                    end_on_final = True
+                elif turn_text:
+                    self._user_tr_output.flush()
+                    turn_text = ""
+                continue
+
+            if not self._agent_session.options.collapse_user_turns:
+                await self._user_tr_output.capture_text(ev.transcript)
+                if ev.is_final:
+                    self._user_tr_output.flush()
+                continue
+
+            text = " ".join(part for part in (turn_text, ev.transcript) if part)
+            await self._user_tr_output.capture_text(text)
+            transcribing = not ev.is_final
             if ev.is_final:
-                self._user_tr_output.flush()
+                if end_on_final:
+                    self._user_tr_output.flush()
+                    turn_text, end_on_final = "", False
+                else:
+                    turn_text = text
+
+    def _end_user_transcript_turn(self) -> None:
+        """End the open user transcription segment; the user's next words start a new one."""
+        if (
+            self._agent_session.options.collapse_user_turns
+            and self._user_transcript_ch is not None
+            and not self._user_transcript_ch.closed
+        ):
+            self._user_transcript_ch.send_nowait(_EndOfUserTurn())
 
     def _emit_session_event(self, name: str, attributes: dict[str, Any]) -> None:
         """Timestamped marker on the agent_session span (the tests' session stand-ins have none)."""
@@ -526,6 +571,8 @@ class RoomIO:
             logger.error("text input callback is not set, ignoring text input")
             return
 
+        # a typed message shows as its own bubble, so later speech must not join an earlier one
+        self._end_user_transcript_turn()
         text_input_cb = self._text_input_cb
         session = self._agent_session
 

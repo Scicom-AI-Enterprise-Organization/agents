@@ -2589,6 +2589,55 @@ class AgentActivity(RecognitionHooks):
             self._cancel_speech_pause(old_task=self._cancel_speech_pause_task)
         )
 
+    def _collapse_into_unanswered_turn(
+        self, user_message: llm.ChatMessage, chat_ctx: llm.ChatContext
+    ) -> llm.ChatMessage:
+        """With ``collapse_user_turns``, extend the user turn the agent has not answered.
+
+        The returned message keeps that turn's id and takes its place, so the turn is removed
+        from ``chat_ctx``. Without a turn to extend, ``user_message`` is returned unchanged.
+        """
+        unanswered = self._session._unanswered_user_message
+        if (
+            unanswered is None
+            or not self._session.options.collapse_user_turns
+            or isinstance(self.llm, llm.RealtimeModel)
+        ):
+            return user_message
+
+        # only a turn nothing of the agent's follows, so the combined turn keeps its place
+        for item in reversed(chat_ctx.items):
+            if item.type == "agent_config_update" or (
+                item.type == "message" and item.role in ("system", "developer")
+            ):
+                continue
+            if item.id != unanswered.id or not isinstance(item, llm.ChatMessage):
+                return user_message
+            previous = item
+            break
+        else:
+            return user_message
+
+        chat_ctx.remove(previous)
+        content = list(previous.content)
+        for part in user_message.content:
+            if isinstance(part, str) and content and isinstance(content[-1], str):
+                content[-1] = " ".join(text for text in (content[-1], part) if text)
+            else:
+                content.append(part)
+        confidences = [
+            confidence
+            for confidence in (previous.transcript_confidence, user_message.transcript_confidence)
+            if confidence is not None
+        ]
+        return previous.model_copy(
+            update={
+                "content": content,
+                "transcript_confidence": min(confidences) if confidences else None,
+                "metrics": user_message.metrics,
+            }
+        )
+
     def on_preemptive_generation(self, info: _PreemptiveGenerationInfo) -> None:
         preemptive_opts = self.preemptive_generation_opts
         if (
@@ -2627,6 +2676,7 @@ class AgentActivity(RecognitionHooks):
         )
 
         chat_ctx = self._agent.chat_ctx.copy()
+        user_message = self._collapse_into_unanswered_turn(user_message, chat_ctx)
         speech_handle = self._generate_reply(
             # we need to send in the original user_message because metrics are injected later on
             user_message=user_message,
@@ -2832,6 +2882,7 @@ class AgentActivity(RecognitionHooks):
         # the user can edit it for the current generation, but changes will not be kept inside the
         # Agent.chat_ctx
         temp_mutable_chat_ctx = self._agent.chat_ctx.copy()
+        user_message = self._collapse_into_unanswered_turn(user_message, temp_mutable_chat_ctx)
         start_time = time.perf_counter()
         # user code that gates the reply; without a span a slow hook is an unexplained gap
         with tracer.start_as_current_span(
@@ -2875,7 +2926,7 @@ class AgentActivity(RecognitionHooks):
                 extra={"lk.pii.user_input": info.new_transcript},
             )
             if user_message and self._session._closing:
-                self._agent._chat_ctx.items.append(user_message)
+                self._agent._chat_ctx._upsert_item(user_message)
                 self._session._conversation_item_added(user_message)
             return
 
@@ -2886,7 +2937,7 @@ class AgentActivity(RecognitionHooks):
             # otherwise invalidate the preemptive generation
             if (
                 _transcripts_equivalent(
-                    preemptive.info.new_transcript, user_message.raw_text_content
+                    preemptive.user_message.raw_text_content or "", user_message.raw_text_content
                 )
                 and preemptive.chat_ctx.is_equivalent(temp_mutable_chat_ctx)
                 and preemptive.tools == self.tools
@@ -3678,8 +3729,11 @@ class AgentActivity(RecognitionHooks):
 
         user_metrics: llm.MetricsReport | None = _previous_user_metrics
         if new_message is not None and speech_handle.scheduled:
-            self._agent._chat_ctx.insert(new_message)
+            # a collapsed user turn replaces the turn it extends, under the same id
+            self._agent._chat_ctx._upsert_item(new_message)
             self._session._conversation_item_added(new_message)
+            if speech_handle.input_details.modality == "audio":
+                self._session._unanswered_user_message = new_message
             user_metrics = new_message.metrics
             self._session._unanswered_user_metrics = user_metrics
 
