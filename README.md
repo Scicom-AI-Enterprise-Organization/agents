@@ -18,6 +18,78 @@
 
 <br />
 
+## Scicom fork
+
+This is Scicom's own fork of LiveKit Agents, maintained here rather than contributed
+upstream. `main` is the `livekit-agents@1.8.8` release plus the changes below, and the
+package still reports version 1.8.8. Only `livekit-agents` changes, so the plugins keep
+coming from PyPI at 1.8.8:
+
+```toml
+"livekit-agents @ git+https://github.com/Scicom-AI-Enterprise-Organization/agents@<commit>#subdirectory=livekit-agents",
+```
+
+### What the fork improves: `collapse_user_turns`
+
+**The problem upstream.** A caller giving a number in pieces ("my number is zero one two"
+… "three four five" … "six seven eight nine") pauses long enough for each piece to end a
+turn. The agent's reply to the first piece is cut off before anyone hears it, yet every
+piece stays a user message of its own:
+
+- the LLM receives `['My number is 012.', '345.', '6789.']`, three user turns in a row with
+  no reply between them, and answers fragments instead of the whole number
+- the webchat shows three user bubbles. With batch STT it splits even within one turn,
+  since every pause yields its own STT final and every final gets its own segment
+
+**The fix.** A turn-handling option, off by default:
+
+```python
+AgentSession(turn_handling={"collapse_user_turns": True})
+```
+
+Until the agent is heard (its audio starts, an assistant message is added, or a tool
+runs), more speech from the user extends their turn instead of starting a new one:
+
+- **LLM**: one user message, keeping the first piece's id, with the pieces joined by
+  spaces: `['My number is 012. 345. 6789.']`. Preemptive generation builds the same
+  combined turn, so its early reply can still be used.
+- **Webchat**: every STT final of the turn goes on one `lk.segment_id`, so the frontend
+  shows one bubble that grows. It is marked final once the agent answers, and a typed
+  message ends it. `@livekit/components-react` needs no change.
+
+With the option off, behaviour is upstream's.
+
+**What a consumer must handle when it is on:**
+
+- `conversation_item_added` fires again for the same item id with the combined text, so
+  keep items by id rather than appending them
+- `on_user_turn_completed` receives the combined message, and its `turn_ctx` no longer
+  holds the earlier piece
+- `lk.transcription_final` on a user segment arrives when the agent answers, not on each
+  STT final
+
+**Where it lives.** `livekit-agents/livekit/agents/voice/`: `turn.py` (the option),
+`agent_session.py` (tracks the unanswered turn), `agent_activity.py` (merges it),
+`room_io/room_io.py` (keeps the segment). Tests are in `tests/test_collapse_user_turns.py`.
+[`examples/collapse_user_turns`](examples/collapse_user_turns) has a test agent and the
+agent-starter-react frontend to try it in a browser.
+
+**Verified** with the full unit suite (5391 passed) and strict mypy, and by a browser run of
+that example against our own LLM, STT, TTS and semantic VAD endpoints.
+
+### Moving to a newer upstream release
+
+`upstream` is `livekit/agents`. Replay the fork's commits onto the new release tag, rerun
+`make unit-tests` and the example, then force-push `main`:
+
+```bash
+git remote add upstream https://github.com/livekit/agents   # once per clone
+git fetch upstream tag livekit-agents@1.8.8 tag livekit-agents@X.Y.Z
+git rebase --onto livekit-agents@X.Y.Z livekit-agents@1.8.8 main
+```
+
+---
+
 Looking for the JS/TS library? Check out [AgentsJS](https://github.com/livekit/agents-js)
 
 ## What is Agents?
