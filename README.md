@@ -21,9 +21,10 @@
 ## Scicom fork
 
 This is Scicom's own fork of LiveKit Agents, maintained here rather than contributed
-upstream. `main` is the `livekit-agents@1.8.8` release plus the changes below, and the
-package still reports version 1.8.8. Only `livekit-agents` changes, so the plugins keep
-coming from PyPI at 1.8.8:
+upstream. `main` is the `livekit-agents@1.8.12` release plus the changes below, and the
+package still reports version 1.8.12. Only `livekit-agents` changes, so the plugins keep
+coming from PyPI at 1.8.12. `git diff livekit-agents@1.8.12 main` shows everything the fork
+changes. Pin a commit of `main`, never the branch name.
 
 ```toml
 "livekit-agents @ git+https://github.com/Scicom-AI-Enterprise-Organization/agents@<commit>#subdirectory=livekit-agents",
@@ -77,15 +78,33 @@ agent-starter-react frontend to try it in a browser.
 **Verified** with the full unit suite (5391 passed) and strict mypy, and by a browser run of
 that example against our own LLM, STT, TTS and semantic VAD endpoints.
 
+### What the fork improves: a VAD silence under 0.25 s
+
+**The problem upstream.** The audio turn detector asks for its prediction after 200 ms of
+silence, while the VAD still reports speech. So upstream refuses a VAD whose
+`min_silence_duration` is under 0.25 s: the session raises `ValueError` when it starts.
+That puts a floor of 0.25 s plus the STT round trip under every end-of-turn wait.
+
+**The fix.** The floor is 50 ms (`MIN_VAD_SILENCE_DURATION_MS` in `inference/eot/base.py`).
+When the VAD ends the speech before the 200 ms mark, `AudioRecognition` asks for the
+prediction on `END_OF_SPEECH` instead, so it leaves together with the STT request. A VAD at
+0.25 s or more behaves as upstream's does.
+
+**What to expect when you use it.** A shorter silence ends more turns while the user is
+only pausing, so use it with `collapse_user_turns`. Tests are in
+`tests/test_audio_recognition_turn_detection.py` (`TestVadMinSilenceRequirement`).
+
 ### Moving to a newer upstream release
 
-`upstream` is `livekit/agents`. Replay the fork's commits onto the new release tag, rerun
-`make unit-tests` and the example, then force-push `main`:
+`upstream` is `livekit/agents`. Merge the new release tag into `main`, resolve the conflicts
+in the files the fork touches, rerun `make unit-tests` and the example, then push `main`.
+No force-push is needed, and commits pinned earlier stay reachable.
 
 ```bash
 git remote add upstream https://github.com/livekit/agents   # once per clone
-git fetch upstream tag livekit-agents@1.8.8 tag livekit-agents@X.Y.Z
-git rebase --onto livekit-agents@X.Y.Z livekit-agents@1.8.8 main
+git fetch upstream tag livekit-agents@X.Y.Z
+git checkout main
+git merge livekit-agents@X.Y.Z
 ```
 
 ---
