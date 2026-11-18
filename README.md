@@ -21,9 +21,10 @@
 ## Scicom fork
 
 This is Scicom's own fork of LiveKit Agents, maintained here rather than contributed
-upstream. This branch, `tm/1.8.12`, is the `livekit-agents@1.8.12` release plus the changes
-below, and the package still reports version 1.8.12. Only `livekit-agents` changes, so the
-plugins keep coming from PyPI at 1.8.12. `main` is the same changes on 1.8.8.
+upstream. `main` is the `livekit-agents@1.8.12` release plus the changes below, and the
+package still reports version 1.8.12. Only `livekit-agents` changes, so the plugins keep
+coming from PyPI at 1.8.12. `git diff livekit-agents@1.8.12 main` shows everything the fork
+changes. Pin a commit of `main`, never the branch name.
 
 ```toml
 "livekit-agents @ git+https://github.com/Scicom-AI-Enterprise-Organization/agents@<commit>#subdirectory=livekit-agents",
@@ -95,14 +96,15 @@ only pausing, so use it with `collapse_user_turns`. Tests are in
 
 ### Moving to a newer upstream release
 
-`upstream` is `livekit/agents`. Replay the fork's commits onto the new release tag, rerun
-`make unit-tests` and the example, then push the result as `tm/X.Y.Z`:
+`upstream` is `livekit/agents`. Merge the new release tag into `main`, resolve the conflicts
+in the files the fork touches, rerun `make unit-tests` and the example, then push `main`.
+No force-push is needed, and commits pinned earlier stay reachable.
 
 ```bash
 git remote add upstream https://github.com/livekit/agents   # once per clone
-git fetch upstream tag livekit-agents@1.8.12 tag livekit-agents@X.Y.Z
-git checkout -b tm/X.Y.Z tm/1.8.12
-git rebase --onto livekit-agents@X.Y.Z livekit-agents@1.8.12
+git fetch upstream tag livekit-agents@X.Y.Z
+git checkout main
+git merge livekit-agents@X.Y.Z
 ```
 
 ---
