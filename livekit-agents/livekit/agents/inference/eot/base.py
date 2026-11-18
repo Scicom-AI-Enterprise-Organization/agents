@@ -30,9 +30,13 @@ from .languages import ThresholdOptions, TurnDetectorModels
 DEFAULT_SAMPLE_RATE: int = 16000
 
 MIN_SILENCE_DURATION_MS = 200
-"""Minimum VAD silence the audio EOT detector needs before it sends
-an inference request. Enforced against the caller-supplied VAD's
-``min_silence_duration`` in ``AudioRecognition``."""
+"""VAD silence after which the audio EOT detector sends an inference request
+while the VAD still reports speech. A VAD whose ``min_silence_duration`` is
+shorter ends the speech first, and the request is sent on its END_OF_SPEECH."""
+
+MIN_VAD_SILENCE_DURATION_MS = 50
+"""Lowest ``min_silence_duration`` a caller-supplied VAD may have with an audio
+EOT detector. Enforced in ``AudioRecognition``."""
 
 DEFAULT_PREDICTION_TIMEOUT = 1.0
 
