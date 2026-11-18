@@ -598,15 +598,48 @@ def _make_recognition_for_validation() -> AudioRecognition:
 
 
 class TestVadMinSilenceRequirement:
-    """TurnDetector rejects a VAD that ends speech before ~200ms of silence."""
+    """With an audio-EOT pairing the VAD's ``min_silence_duration`` may go down to 50 ms.
+    Rather than mutate the user's VAD, ``AudioRecognition`` fails fast below that. A VAD
+    that ends the speech before the 200 ms silence tick has its request started on EOS."""
 
     def test_low_min_silence_with_audio_detector_raises(self) -> None:
         ar = _make_recognition_for_validation()
-        ar._vad = _FakeVad(min_silence_duration=0.1)
+        ar._vad = _FakeVad(min_silence_duration=0.03)
         ar._turn_detector = MagicMock(spec=_StreamingTurnDetector)
 
         with pytest.raises(ValueError, match="min_silence_duration"):
             ar._check_vad_silence_requirement()
+
+    def test_fifty_ms_min_silence_passes(self) -> None:
+        ar = _make_recognition_for_validation()
+        ar._vad = _FakeVad(min_silence_duration=0.05)
+        ar._turn_detector = MagicMock(spec=_StreamingTurnDetector)
+
+        ar._check_vad_silence_requirement()  # must not raise
+
+    async def test_eos_starts_request_when_vad_ends_before_silence_tick(self) -> None:
+        ar = _make_full_recognition_for_eou()
+        ar._vad = _FakeVad(min_silence_duration=0.05)
+        ar._speaking = True
+
+        await ar._on_vad_event(_end_of_speech())
+
+        assert ar._turn_detector_stream.predict.call_count == 1
+        assert ar._turn_detector_prediction_fut is not None
+
+    async def test_eos_leaves_flushed_turn_and_held_request_alone(self) -> None:
+        ar = _make_full_recognition_for_eou()
+        ar._vad = _FakeVad(min_silence_duration=0.05)
+        ar._turn_detector_flushed = True
+        await ar._on_vad_event(_end_of_speech())
+        assert ar._turn_detector_stream.predict.call_count == 0
+
+        ar._turn_detector_flushed = False
+        fut, _ = _resolved_prediction(0.9)
+        ar._turn_detector_prediction_fut = fut
+        await ar._on_vad_event(_end_of_speech())
+        assert ar._turn_detector_stream.predict.call_count == 0
+        assert ar._turn_detector_prediction_fut is fut
 
     def test_adequate_min_silence_passes(self) -> None:
         ar = _make_recognition_for_validation()
@@ -641,7 +674,7 @@ class TestVadMinSilenceRequirement:
         """Attaching an audio detector over a too-low VAD raises before building a stream."""
         ar = _make_recognition_for_validation()
         ar._tasks = set()
-        ar._vad = _FakeVad(min_silence_duration=0.1)
+        ar._vad = _FakeVad(min_silence_duration=0.03)
 
         detector = MagicMock(spec=_StreamingTurnDetector)
 

@@ -19,7 +19,7 @@ from livekit import rtc
 
 from .. import inference, llm, stt, tokenize, utils, vad
 from .._exceptions import APIError
-from ..inference.eot.base import MIN_SILENCE_DURATION_MS
+from ..inference.eot.base import MIN_SILENCE_DURATION_MS, MIN_VAD_SILENCE_DURATION_MS
 from ..inference.interruption import (
     _AgentSpeechEndedSentinel,
     _AgentSpeechStartedSentinel,
@@ -958,12 +958,18 @@ class AudioRecognition:
             return
         if (current := getattr(target_vad, "min_silence_duration", None)) is None:
             return
-        required = (MIN_SILENCE_DURATION_MS + 50) / 1000
+        required = MIN_VAD_SILENCE_DURATION_MS / 1000
         if current < required:
             raise ValueError(
                 f"vad min_silence_duration={current}s is too low for the TurnDetector. "
                 f"Raise the VAD's min_silence_duration to at least {required}s."
             )
+
+    def _vad_ends_speech_before_silence_tick(self) -> bool:
+        """Whether the VAD's ``min_silence_duration`` is too short for the silence tick
+        (``MIN_SILENCE_DURATION_MS`` of silence while still speaking) to come first."""
+        min_silence = getattr(self._vad, "min_silence_duration", None)
+        return min_silence is not None and min_silence < (MIN_SILENCE_DURATION_MS + 50) / 1000
 
     def _update_vad(self, vad: vad.VAD | None) -> None:
         self._vad = vad
@@ -1561,6 +1567,18 @@ class AudioRecognition:
             self._speaking = False
             speech_end_time = time.time() - ev.silence_duration - ev.inference_duration
             self._last_speaking_time = speech_end_time
+
+            # the silence tick owns the inference request, except with a VAD that ends the
+            # speech before the tick can fire: then the request starts here
+            if (
+                self._vad_ends_speech_before_silence_tick()
+                and self._turn_detector_stream is not None
+                and self._turn_detector_prediction_fut is None
+                and not self._turn_detector_flushed
+            ):
+                self._turn_detector_prediction_fut = self._turn_detector_stream.predict(
+                    chat_ctx=self._hooks.retrieve_chat_ctx()
+                )
 
             # A committed turn clears _vad_speech_started before its late VAD EOS arrives.
             if self._stt_pipeline is not None and vad_speech_started:

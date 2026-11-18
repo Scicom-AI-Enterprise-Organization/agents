@@ -367,6 +367,7 @@ def _vad_recognition() -> AudioRecognition:
     ar._user_silence_ev = asyncio.Event()
     ar._speaking = False
     ar._agent_speaking = False
+    ar._vad = None
     ar._turn_detector_stream = None
     ar._end_of_turn_task = None
     ar._user_turn_span = None
